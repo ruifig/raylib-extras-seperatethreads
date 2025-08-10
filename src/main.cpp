@@ -28,6 +28,8 @@
 *
 ********************************************************************************************/
 
+#include "Common.h"
+#include "FrameThread.h"
 #include "RenderQueue.h"
 #include "FPSCalculator.h"
 #include "raylib.h"
@@ -53,14 +55,6 @@ using namespace std::literals::chrono_literals;
 //
 #define NUM_THREADS 3
 
-
-#if defined(NDEBUG)
-    #define DOLOG(...)
-#else
-    #define DOLOG(...) printf(##__VA_ARGS__)
-#endif
-
-
 //
 // Do some checks to see if the development environment has all we need
 //
@@ -68,256 +62,150 @@ using namespace std::literals::chrono_literals;
     #error This sample requires Raylib to be compiled with SUPPORT_CUSTOM_FRAME_CONTROL
 #endif
 
-#ifdef __has_cpp_attribute
-    #if __has_include(<barrier>)
-        #include <barrier>
-    #else
-        #error This sample requires support for std::barrier
-    #endif
-#else
-    #error This sample requires C++20
-#endif
-
-#pragma comment(lib, "raylib.lib")
-
 Camera3D camera = {};
 
-//
-// Just putting all these in a struct so we polute the global namespace as little as possible
-//
-struct ThreadControls
-{
-    ThreadControls()
-        : frameStartBarrier(NUM_THREADS)
-        , frameEndBarrier(NUM_THREADS)
-    {
-    }
-
-    std::atomic<bool> shouldFinish = false;
-
-    // Used by all threads to wait until every other thread finishes its frame work.
-    std::barrier<> frameEndBarrier;
-
-    // Used by all threads to wait for the main thread to prepare the next frame.
-    std::barrier<> frameStartBarrier;
-
-    // seconds from the last frame
-    std::chrono::high_resolution_clock::time_point frameStartTime;
-    float deltaSeconds = 0;
-} thCtrl;
-
-//
-// A thread wrapper to make it easier to add more threads to the frame synchronization.
-// A worker thread only has to provide the `tick` method, which gets call each frame.
-//
-class WorkerThread
-{
-public:
-    explicit WorkerThread(std::string_view name)
-        : name(name)
-    {
-    }
-
-    virtual ~WorkerThread()
-    {
-        th.join();
-    }
-
-    void start()
-    {
-        th = std::thread([this]()
-        {
-            onStarted();
-            while (!thCtrl.shouldFinish)
-            {
-                // We can only start our work once all threads are ready to start (aka: arrive at the frameStart barrier)
-                DOLOG("%s: Arrived at frameStartBarrier.\n", name.c_str());
-                thCtrl.frameStartBarrier.arrive_and_wait();
-
-                // Do the work for the current frame
-                auto start = std::chrono::high_resolution_clock::now();
-                tick();
-                workCalc.tick(std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - start).count());;
-
-                // We are done with our work, so now wait for all other threads to finish  (aka: arrive at the frameEnd barrier)
-                DOLOG("%s: Arrived at frameEndBarrier.\n", name.c_str());
-                thCtrl.frameEndBarrier.arrive_and_wait();
-            }
-
-            onEnded();
-        });
-    }
-
-    float getAvgWorkTimeMs() const
-    {
-        return workCalc.avgMsPerFrame;
-    }
-
-protected:
-
-    virtual void onStarted() {}
-    virtual void onEnded() {}
-
-    // Custom worker threads should implement this.
-    // This is called one per game loop.
-    virtual void tick() = 0;
-
-    // Abusing the fps calculator to calculate how long the work takes
-    FPSCalculator workCalc;
-
-    std::string name;
-private:
-
-    std::thread th;
-};
+FrameThreadControl thControl(NUM_THREADS);
 
 //
 // Thread for physics
 //
-class PhysicsThread : public WorkerThread
+class PhysicsThread : public FrameThread
 {
 public:
-    PhysicsThread()
-        : WorkerThread("Physics")
+    PhysicsThread(FrameThreadControl& control)
+        : FrameThread(control, "Physics")
     {
     }
 
 protected:
-    void tick() override
+    void Update() override
     {
-        DOLOG("%s: Work done\n", name.c_str());
         // Since we don't really have Physics in this sample, we just fake some work with a sleep
         std::this_thread::sleep_for(5ms);
     }
 };
 
-PhysicsThread physicsTh;
+PhysicsThread physicsTh(thControl);
 float renderAvgWorkTimeMs = 0;
 
 //
 // Thread for the gameplay logic.
 //
-class GameLogicThread : public WorkerThread
+class GameLogicThread : public FrameThread
 {
 public:
-    GameLogicThread()
-        : WorkerThread("GameLogic")
-        , rdgen(std::random_device()())
+    GameLogicThread(FrameThreadControl& control)
+        : FrameThread(control, "GameLogic")
+        , Rdgen(std::random_device()())
     {
     }
 
 protected:
 
     // Generate a random integer number in the [from, to] range
-    int genRd(int from, int to)
+    int GenRd(int from, int to)
     {
         std::uniform_int_distribution distrib(from, to);
-        return distrib(rdgen);
+        return distrib(Rdgen);
     }
 
     // Generate a random float number in the [from, to] range
-    float genRd(float from, float to)
+    float GenRd(float from, float to)
     {
         std::uniform_real_distribution<float> distrib(from, to);
-        return distrib(rdgen);
+        return distrib(Rdgen);
     }
 
     // Generates a random color (with alpha set to 255)
-    Color genRdColor()
+    Color GenRdColor()
     {
         return {
-            static_cast<uint8_t>(genRd(0, 255)),
-            static_cast<uint8_t>(genRd(0, 255)),
-            static_cast<uint8_t>(genRd(0, 255)),
+            static_cast<uint8_t>(GenRd(0, 255)),
+            static_cast<uint8_t>(GenRd(0, 255)),
+            static_cast<uint8_t>(GenRd(0, 255)),
             255
             };
     }
     
     // Add `count` random cubes
-    void addCube(int count)
+    void AddCube(int count)
     {
         while(count--)
         {
-            cubes.emplace_back();
-            cubes.back().rotationSpeed = genRd(0.02f, 2.0f);
-            cubes.back().color = genRdColor();
-            cubes.back().wcolor = genRdColor();
-            cubes.back().width =  genRd(0.05f, 2.0f);
-            cubes.back().height = genRd(0.05f, 2.0f);
-            cubes.back().length = genRd(0.05f, 2.0f);
-            cubes.back().position = {genRd(-100.0f, 100.0f), genRd(-100.0f, 100.0f), genRd(-500.0f, 80.0f)};
-            cubes.back().rotationAxis = Vector3Normalize({genRd(-1.f, 1.f), genRd(-1.f, 1.f), genRd(-1.f, 1.f)});
+            Cubes.emplace_back();
+            Cubes.back().RotationSpeed = GenRd(0.02f, 2.0f);
+            Cubes.back().CubeColor = GenRdColor();
+            Cubes.back().WireColor = GenRdColor();
+            Cubes.back().Width =  GenRd(0.05f, 2.0f);
+            Cubes.back().Height = GenRd(0.05f, 2.0f);
+            Cubes.back().Length = GenRd(0.05f, 2.0f);
+            Cubes.back().Position = {GenRd(-100.0f, 100.0f), GenRd(-100.0f, 100.0f), GenRd(-500.0f, 80.0f)};
+            Cubes.back().RotationAxis = Vector3Normalize({GenRd(-1.f, 1.f), GenRd(-1.f, 1.f), GenRd(-1.f, 1.f)});
         }
     }
 
-    void onStarted()
+    void OnStart()
     {
-        Mesh cube = GenMeshCube(1,1,1);
-        UploadMesh(&cube, false);
-        cubeModel = LoadModelFromMesh(cube);
-
-        addCube(10000);
+        AddCube(5000);
     }
 
-    void tick() override
+    void Update() override
     {
-        fpsCalc.tick(thCtrl.deltaSeconds);
+        FpsCalc.Tick(Control.DeltaSeconds);
 
         // Process the cubes
-        for(Cube& cube : cubes)
+        for(Cube& cube : Cubes)
         {
-            cube.rotationDegrees += thCtrl.deltaSeconds * 360 * cube.rotationSpeed;
-            RenderQueue::drawCubeEx(cube.position, cube.rotationDegrees, cube.rotationAxis, cube.width, cube.height, cube.height, cube.color, cube.wcolor);
+            cube.RotationDegrees += Control.DeltaSeconds * 360 * cube.RotationSpeed;
+            RenderQueue::DrawCubeEx(cube.Position, cube.RotationDegrees, cube.RotationAxis, cube.Width, cube.Height, cube.Height, cube.CubeColor, cube.WireColor);
         }
 
         constexpr int fontSize = 20;
-        auto line = [&](int l) { return l * fontSize; };
+        auto Line = [&](int l) { return l * fontSize; };
 
-        RenderQueue::drawRectangle(0, 0, fontSize*30, 6*fontSize, {32, 32, 32, 200});
-        RenderQueue::drawText(TextFormat("FPS: %d", static_cast<int>(fpsCalc.fps)) , 0, line(0), fontSize, RED);
-        RenderQueue::drawText(TextFormat("GameLogic frametime: %4.2f ms", getAvgWorkTimeMs()), 0, line(1), fontSize, RED);
-        RenderQueue::drawText(TextFormat("Physics frametime: %4.2f ms", physicsTh.getAvgWorkTimeMs()), 0, line(2), fontSize, RED);
-        RenderQueue::drawText(TextFormat("Render frametime: %4.2f ms", renderAvgWorkTimeMs), 0, line(3), fontSize, RED);
+        RenderQueue::DrawRectangle(0, 0, fontSize * 30, 6 * fontSize, {32, 32, 32, 200});
+        RenderQueue::DrawText(TextFormat("FPS: %d", FpsCalc.GetFps()), 0, Line(0), fontSize, RED);
+        RenderQueue::DrawText(TextFormat("GameLogic frametime: %4.2f ms", GetAvgWorkTimeMs()), 0, Line(1), fontSize, RED);
+        RenderQueue::DrawText(TextFormat("Physics frametime: %4.2f ms", physicsTh.GetAvgWorkTimeMs()), 0, Line(2), fontSize, RED);
+        RenderQueue::DrawText(TextFormat("Render frametime: %4.2f ms", renderAvgWorkTimeMs), 0, Line(3), fontSize, RED);
+        RenderQueue::DrawText(TextFormat("Number of cubes: %d", static_cast<int>(Cubes.size())), 0, Line(4), fontSize, RED);
+        RenderQueue::DrawText("Press [ or ] change the number of cubes", 0, Line(5), 20, BROWN);
 
-        RenderQueue::drawText(TextFormat("Number of cubes: %d", static_cast<int>(cubes.size())), 0, line(4), fontSize, RED);
-        RenderQueue::drawText("Press [ or ] change the number of cubes", 0, line(5), 20, BROWN);
-
+        constexpr int numCubes = 100;
         if (IsKeyPressed(KEY_LEFT_BRACKET))
         {
-            int todo = std::min(100, static_cast<int>(cubes.size()));
+            int todo = std::min(numCubes, static_cast<int>(Cubes.size()));
             while(todo--)
             {
-                cubes.pop_back();
+                Cubes.pop_back();
             }
         }
         else if (IsKeyPressed(KEY_RIGHT_BRACKET))
         {
-            addCube(100);
+            AddCube(numCubes);
         }
 
-        DOLOG("%s: Work done\n", name.c_str());
+        DOLOG("%s: Work done\n", Name.c_str());
     }
 
     struct Cube
     {
-        float rotationSpeed; // Rotation speed in full revolutions per second
-        float rotationDegrees; // Rotation in degrees
-        Vector3 rotationAxis;
-        Vector3 position;
-        float width;
-        float height;
-        float length;
-        Color color;
-        Color wcolor;
+        float RotationSpeed; // Rotation speed in full revolutions per second
+        float RotationDegrees; // Rotation in degrees
+        Vector3 RotationAxis;
+        Vector3 Position;
+        float Width;
+        float Height;
+        float Length;
+        Color CubeColor;
+        Color WireColor;
     };
-    std::vector<Cube> cubes;
-    FPSCalculator fpsCalc;
-    std::mt19937 rdgen;
-
-    Model cubeModel;
+    std::vector<Cube> Cubes;
+    FPSCalculator<> FpsCalc;
+    std::mt19937 Rdgen;
 };
 
-GameLogicThread gameLogicTh;
+GameLogicThread gameLogicTh(thControl);
 
 int main(int argc, char* argv[])
 {
@@ -339,8 +227,8 @@ int main(int argc, char* argv[])
     // Abusing the FPSCalculator to calculate how long the rendering takes.
     FPSCalculator renderWorkCalc;
 
-    gameLogicTh.start();
-    physicsTh.start();
+    gameLogicTh.Start();
+    physicsTh.Start();
 
     uint32_t frameNum = 0;
 
@@ -348,13 +236,12 @@ int main(int argc, char* argv[])
     // Main game loop
     // This loop behaves very simular to the worker threads, with the extra step to prepare for the next frame
     //
-    while (!thCtrl.shouldFinish)  // Detect window close button or ESC key
+    while (!thControl.ShouldFinish)  // Detect window close button or ESC key
     {
-
         {
             DOLOG("Starting frame %u\n", frameNum);
             DOLOG("%s: Arrived at frameStartBarrier.\n", "MainTread");
-            thCtrl.frameStartBarrier.arrive_and_wait();
+            thControl.FrameStartBarrier.arrive_and_wait();
         }
 
         //
@@ -366,34 +253,34 @@ int main(int argc, char* argv[])
             BeginDrawing();
                 ClearBackground(WHITE);
                 // Execute the render commands
-                RenderQueue::get().render();
+                RenderQueue::Get().Render();
             EndDrawing();
             SwapScreenBuffer();
 
             DOLOG("%s: Work done\n", "MainThread");
 
             if (WindowShouldClose())
-                thCtrl.shouldFinish = true;
+                thControl.ShouldFinish = true;
 
-            renderWorkCalc.tick(std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - start).count());;
-            renderAvgWorkTimeMs = renderWorkCalc.avgMsPerFrame;
+            renderWorkCalc.Tick(std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - start).count());;
+            renderAvgWorkTimeMs = renderWorkCalc.GetAvgMs();
         }
 
         // Signal that we are finished with our work.
         // This waits for all other threads to finish, so that then we can prepare for the next
         // frame.
         DOLOG("%s: Arrived at frameEndBarrier.\n", "MainThread");
-        thCtrl.frameEndBarrier.arrive_and_wait();
+        thControl.FrameEndBarrier.arrive_and_wait();
         
         // At this point all threads are done with their work for the frame and are waiting for this thread to
         // kickstart the next frame. In this step, we update whatever Raylib internals we need, such as polling input.
         {
-            RenderQueue::get().swapQueues();
+            RenderQueue::Get().SwapQueues();
             PollInputEvents();
             ++frameNum;
             auto now = std::chrono::high_resolution_clock::now();
-            thCtrl.deltaSeconds = std::chrono::duration<float>(now - thCtrl.frameStartTime).count();
-            thCtrl.frameStartTime = now;
+            thControl.DeltaSeconds = std::chrono::duration<float>(now - thControl.FrameStartTime).count();
+            thControl.FrameStartTime = now;
         }
     }
 
@@ -404,3 +291,4 @@ int main(int argc, char* argv[])
 
     return 0;
 }
+

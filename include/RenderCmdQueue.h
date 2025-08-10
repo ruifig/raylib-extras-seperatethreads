@@ -39,7 +39,7 @@
 
 namespace details
 {
-    inline std::size_t next_pow2(std::size_t n) noexcept
+    inline std::size_t NextPow2(std::size_t n) noexcept
     {
         std::size_t result = 1;
         while (result <= n)
@@ -49,10 +49,10 @@ namespace details
         return result;
     }
 
-    inline std::size_t round_pow2(std::size_t n) noexcept
+    inline std::size_t RoundPow2(std::size_t n) noexcept
     {
         if ((n == 0) || (n & (n - 1)))
-            return next_pow2(n);
+            return NextPow2(n);
         return n;
     }
 
@@ -60,7 +60,7 @@ namespace details
      * Returns `a` rounded up to a multiple of `b`
      */
     template<typename T>
-    static constexpr T roundUpToMultipleOf(T a, T b)
+    static constexpr T RoundUpToMultipleOf(T a, T b)
     {
         // If `b` is 0, then we don't do any alignment
         if (b == 0)
@@ -72,8 +72,13 @@ namespace details
         //
         return ((a + b - 1) / b) * b;
     }
-}
 
+} // namespace details
+
+
+/*!
+ * Data container for for trivially copyable lambdas.
+ */
 class RenderCmdQueue
 {
   public:
@@ -87,7 +92,7 @@ class RenderCmdQueue
     {
         Ref() = default;
         explicit Ref(SizeType pos)
-            : pos(pos)
+            : Pos(pos)
         {
         }
 
@@ -97,12 +102,12 @@ class RenderCmdQueue
          * Returns true if the iterator is set (even if pointing to end())
          * This is only useful when the user code needs to check if a reference was set to point to something or not. 
          */
-        bool isSet() const noexcept
+        bool IsSet() const noexcept
         {
-            return pos != InvalidValue;
+            return Pos != InvalidValue;
         }
 
-        SizeType pos = InvalidValue;
+        SizeType Pos = InvalidValue;
     };
 
     /*!
@@ -112,24 +117,24 @@ class RenderCmdQueue
      */ 
     RenderCmdQueue(uint32_t capacity = 0)
     {
-        m_data = static_cast<uint8_t*>(malloc(capacity));
-        m_capacity = capacity;
+        Data = static_cast<uint8_t*>(malloc(capacity));
+        Capacity = capacity;
     }
 
     ~RenderCmdQueue()
     {
-        free(m_data);
+        free(Data);
     }
 
     struct Base
     {
         Base(SizeType size)
-            : size (size)
+            : Size (size)
         {
         }
 
-        SizeType size;
-        virtual void call(RenderCmdQueue& q) const = 0;
+        SizeType Size;
+        virtual void Call(RenderCmdQueue& q) const = 0;
     };
 
     /*!
@@ -141,62 +146,61 @@ class RenderCmdQueue
     {
         Wrapper(T&& payload)
             : Base(sizeof(*this))
-            , payload(std::forward<T>(payload))
+            , Payload(std::forward<T>(payload))
         {
         }
 
-        void call(RenderCmdQueue& q) const override
+        void Call(RenderCmdQueue& q) const override
         {
-            payload(q);
+            Payload(q);
         }
 
-        T payload;
+        T Payload;
     };
 
     template<typename T>
-    void push(T&& v)
+    void Push(T&& v)
     {
         // T needs to be copyable with memcmp
         static_assert(std::is_trivially_copyable_v<T>);
 
         static constexpr size_t needed = sizeof(Wrapper<T>);
 
-        if (getFreeCapacity() < needed)
+        if (GetFreeCapacity() < needed)
         {
-            grow(needed);
+            Grow(needed);
         }
 
-        uint32_t offset = m_usedCapacity;
-        [[maybe_unused]] Wrapper<T>* ptr = new(m_data + offset) Wrapper<T>(std::forward<T>(v));
-        m_usedCapacity += needed;
-        ++m_numElements;
+        uint32_t offset = UsedCapacity;
+        [[maybe_unused]] Wrapper<T>* ptr = new(Data + offset) Wrapper<T>(std::forward<T>(v));
+        UsedCapacity += needed;
+        ++NumElements;
 
-        if (!m_first.isSet())
+        if (!First.IsSet())
         {
-            m_first = Ref(offset);
+            First = Ref(offset);
         }
 
-        m_last = Ref(offset);
+        Last = Ref(offset);
     }
 
     template<typename T>
-    Ref oob_push_empty(size_t count)
+    Ref OobPushEmpty(size_t count)
     {
-        static_assert(std::is_standard_layout_v<T>);
-        static_assert(std::is_trivially_destructible_v<T>);
+        static_assert(std::is_trivially_copyable_v<T>);
 
-        SizeType alignedNeededCapacity = details::roundUpToMultipleOf(
+        SizeType alignedNeededCapacity = details::RoundUpToMultipleOf(
             static_cast<SizeType>(count * sizeof(T)), static_cast<SizeType>(sizeof(size_t)));
-        if (getFreeCapacity() < alignedNeededCapacity)
+        if (GetFreeCapacity() < alignedNeededCapacity)
         {
-            grow(alignedNeededCapacity);
+            Grow(alignedNeededCapacity);
         }
 
-        Ref res(m_usedCapacity);
-        m_usedCapacity += alignedNeededCapacity;
-        if (m_last.isSet())
+        Ref res(UsedCapacity);
+        UsedCapacity += alignedNeededCapacity;
+        if (Last.IsSet())
         {
-            at(m_last).size += alignedNeededCapacity;
+            At(Last).Size += alignedNeededCapacity;
         }
 
         return res;
@@ -208,10 +212,10 @@ class RenderCmdQueue
      * The purpose of this kind of data is for when you need to insert raw data into the vector that other objects need to use.
      */
     template<typename T>
-    RenderCmdQueue::Ref oob_push(const T* data, size_t count)
+    RenderCmdQueue::Ref OobPush(const T* data, size_t count)
     {
-        Ref res = oob_push_empty(count);
-        uint8_t* ptr = m_data + res.pos;
+        Ref res = OobPushEmpty(count);
+        uint8_t* ptr = Data + res.Pos;
         memcpy(ptr, data, count * sizeof(T));
         return res;
     }
@@ -219,47 +223,46 @@ class RenderCmdQueue
     /*!
      * Returns a pointer to an oob data
      */
-    uint8_t* oobAt(Ref ref) const
+    uint8_t* OobAt(Ref ref) const
     {
-        assert(ref.pos < m_usedCapacity);
-        return m_data + ref.pos;
+        assert(ref.Pos < UsedCapacity);
+        return Data + ref.Pos;
     }
 
     /*!
      * Give an oob reference, it returns it's data pointer, cast to the specified type
      */
     template<typename T>
-    T& oobAtAs(Ref ref) const
+    T& OobAtAs(Ref ref) const
     {
-        static_assert(std::is_standard_layout_v<T>);
-        static_assert(std::is_trivially_destructible_v<T>);
-        return *reinterpret_cast<T*>(oobAt(ref));
+        static_assert(std::is_trivially_copyable_v<T>);
+        return *reinterpret_cast<T*>(OobAt(ref));
     }
 
     /*!
      * Runs all the commands
      */
-    void callAll()
+    void CallAll()
     {
-        const uint8_t* ptr = m_data + (m_first.isSet() ? m_first.pos : 0);
-        uint32_t todo = m_numElements;
+        const uint8_t* ptr = Data + (First.IsSet() ? First.Pos : 0);
+        uint32_t todo = NumElements;
         while (todo--)
         {
             const Base* op = reinterpret_cast<const Base*>(ptr);
-            ptr += op->size;
-            op->call(*this);
+            ptr += op->Size;
+            op->Call(*this);
         }
     }
 
     /*!
      * Clears the queue
      */
-    void clear()
+    void Clear()
     {
-        m_usedCapacity = 0;
-        m_numElements = 0;
-        m_first = {};
-        m_last = {};
+        UsedCapacity = 0;
+        NumElements = 0;
+        First = {};
+        Last = {};
     }
 
   private:
@@ -268,65 +271,65 @@ class RenderCmdQueue
     /*!
      * Given a Ref, it returns the object at that position.
      */
-    Base& at(Ref ref)
+    Base& At(Ref ref)
     {
-        assert(ref.pos < m_usedCapacity);
-        return *reinterpret_cast<Base*>(m_data + ref.pos);
+        assert(ref.Pos < UsedCapacity);
+        return *reinterpret_cast<Base*>(Data + ref.Pos);
     }
 
     /*!
      * Returns the free capacity, in bytes
      */
-    SizeType getFreeCapacity() const
+    SizeType GetFreeCapacity() const
     {
-        return m_capacity - m_usedCapacity;
+        return Capacity - UsedCapacity;
     }
 
     /*!
      * Grows the container by the specified amount of bytes
      */
-    void grow(SizeType requiredFreeCapacity)
+    void Grow(SizeType requiredFreeCapacity)
     {
-        SizeType newCapacity = static_cast<SizeType>(details::round_pow2(m_usedCapacity + requiredFreeCapacity));
+        SizeType newCapacity = static_cast<SizeType>(details::RoundPow2(UsedCapacity + requiredFreeCapacity));
 
         // Allocate new block
         uint8_t* newData = reinterpret_cast<uint8_t*>(malloc(newCapacity));
 
         // Copy current block to new one and adjust the header information
-        if (m_data)
+        if (Data)
         {
-            memcpy(newData, m_data, m_usedCapacity);
-            free(m_data);
+            memcpy(newData, Data, UsedCapacity);
+            free(Data);
         }
 
-        m_data = newData;
-        m_capacity = newCapacity;
+        Data = newData;
+        Capacity = newCapacity;
     }
 
     /*!
      * Buffer where the elements are kept
      */
-    uint8_t* m_data = nullptr;
+    uint8_t* Data = nullptr;
 
     /*!
      * Since the elements put into the container can be of different sizes, any mention of capacity therefore are in bytes.
      * not the number of elements, since that is unknown. As-in, there is no way to know how many elements will fit in the
      * available capacity.
      */
-    uint32_t m_capacity = 0;
-    uint32_t m_usedCapacity = 0;
+    uint32_t Capacity = 0;
+    uint32_t UsedCapacity = 0;
 
     /*!
      * Number of elements in the container
      */
-    uint32_t m_numElements = 0;
+    uint32_t NumElements = 0;
 
     /*!
      * Reference to the first inserted element and the last.
      * This is needed to support OOB data.
      */
-    Ref m_first;
-    Ref m_last;
+    Ref First;
+    Ref Last;
 };
 
 #if defined(_MSVC_LANG)
