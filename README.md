@@ -2,7 +2,7 @@
 
 Raylib sample on how to implement a render command queue.
 
-Raylib's API is single threaded, but with some care, one can have thread dedicated to Raylib calls, while another thread runs the game logic AND query Raylib input.
+Raylib's API is single threaded, but with some care, one can have a thread dedicated to Raylib calls, while another thread runs the game logic AND some Raylib calls (such as querying input)
 
 A few things are displayed:
 
