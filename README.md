@@ -1,4 +1,4 @@
-# raylib-extras-seperatethreads
+# Raylib-MultiThreadingExample
 
 Raylib sample on how to implement a render command queue.
 
